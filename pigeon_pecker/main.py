@@ -8,12 +8,11 @@ from PySide6.QtCore import QMetaObject, QPointF, Qt
 from PySide6.QtGui import QAction, QColor, QGuiApplication, QIcon, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
-from .hotkey import HotkeyListener
-from .ns_overlay import NSOverlayManager
-from .ns_sprites import load_ns_sprites
+from .hotkey import HotkeyListener, hotkey_label
+from .platform_support import IS_MAC, IS_WINDOWS
 from .pigeon import Pigeon
 from .settings import Settings
-from .sprites import load_sprites  # 트레이 아이콘용
+from .sprites import load_sprites  # 트레이 아이콘 + (macOS 외) 오버레이 스프라이트
 from .trackers.mouse import get_global_mouse_pos
 
 
@@ -40,10 +39,18 @@ class App:
         print("=" * 60, flush=True)
         print(f"[pigeon] PID: {os.getpid()}", flush=True)
         print("[pigeon] 종료 방법:", flush=True)
-        print("[pigeon]   1) ⌃⌥⌘Q (Control+Option+Command+Q) 어디서나", flush=True)
-        print("[pigeon]   2) 메뉴바 비둘기 아이콘 → 종료", flush=True)
-        print(f"[pigeon]   3) 터미널: kill {os.getpid()}", flush=True)
-        print("[pigeon]   4) 터미널: pkill -f pigeon_pecker.main", flush=True)
+        if IS_MAC:
+            print("[pigeon]   1) ⌃⌥⌘Q (Control+Option+Command+Q) 어디서나", flush=True)
+            print("[pigeon]   2) 메뉴바 비둘기 아이콘 → 종료", flush=True)
+            print(f"[pigeon]   3) 터미널: kill {os.getpid()}", flush=True)
+            print("[pigeon]   4) 터미널: pkill -f pigeon_pecker.main", flush=True)
+        elif IS_WINDOWS:
+            print("[pigeon]   1) Ctrl+Alt+Q 어디서나", flush=True)
+            print("[pigeon]   2) 작업 표시줄 트레이 비둘기 아이콘 → 종료", flush=True)
+            print(f"[pigeon]   3) 명령 프롬프트: taskkill /PID {os.getpid()} /F", flush=True)
+        else:
+            print("[pigeon]   1) 트레이 비둘기 아이콘 → 종료", flush=True)
+            print(f"[pigeon]   2) 터미널: kill {os.getpid()}", flush=True)
         print("=" * 60, flush=True)
 
         self.settings = Settings()
@@ -86,22 +93,36 @@ class App:
         )
         mouse_pigeon.pos = start_mouse
 
-        # 네이티브 NSPanel 오버레이 — Qt QWidget의 occlusion 문제 회피
-        ns_sprites = load_ns_sprites()
-        self.overlays = NSOverlayManager([mouse_pigeon], self.settings)
-        self.overlays.set_sprites(ns_sprites)
-        self.overlays.show()
-        self.overlays.start()
-
-        print(f"[pigeon] NS overlays created for {len(self.overlays.panels)} screen(s)", flush=True)
+        # 오버레이 백엔드 선택:
+        #  - macOS  : 네이티브 NSPanel (Qt QWidget의 occlusion 문제 회피)
+        #  - 그 외   : Qt 기반 오버레이 (occlusion 문제 없음 → Qt로 충분)
+        if IS_MAC:
+            from .ns_overlay import NSOverlayManager
+            from .ns_sprites import load_ns_sprites
+            self.overlays = NSOverlayManager([mouse_pigeon], self.settings)
+            self.overlays.set_sprites(load_ns_sprites())
+            self.overlays.show()
+            self.overlays.start()
+            screen_count = len(self.overlays.panels)
+            print(f"[pigeon] NS overlays created for {screen_count} screen(s)", flush=True)
+        else:
+            from .overlay import OverlayManager
+            self.overlays = OverlayManager([mouse_pigeon], self.settings)
+            self.overlays.set_sprites(sprites)
+            self.overlays.show()
+            self.overlays.start()
+            screen_count = len(self.overlays.overlays)
+            print(f"[pigeon] Qt overlays created for {screen_count} screen(s)", flush=True)
 
         self._build_tray(app_icon)
 
         self.hotkey = HotkeyListener(self._emergency_quit)
         hk_ok = self.hotkey.start()
         print(f"[pigeon] global hotkey active: {hk_ok}", flush=True)
-        if not hk_ok:
+        if not hk_ok and IS_MAC:
             print("[pigeon] WARNING: 글로벌 단축키 비활성. 시스템 설정 → 개인정보보호 → '입력 모니터링'에서 터미널/Python 허용 필요", flush=True)
+        elif not hk_ok:
+            print("[pigeon] WARNING: 글로벌 단축키 비활성 — 트레이 메뉴로 종료하세요", flush=True)
 
         self.qapp.aboutToQuit.connect(self._cleanup)
 
@@ -132,7 +153,9 @@ class App:
         act_about.triggered.connect(self._show_about)
         menu.addAction(act_about)
 
-        act_quit = QAction("종료  (⌃⌥⌘Q)", menu)
+        label = hotkey_label()
+        quit_text = f"종료  ({label})" if label else "종료"
+        act_quit = QAction(quit_text, menu)
         act_quit.triggered.connect(self.qapp.quit)
         menu.addAction(act_quit)
 
@@ -140,12 +163,14 @@ class App:
         self.tray.show()
 
     def _show_about(self) -> None:
+        label = hotkey_label()
+        quit_line = f"\n강제 종료: {label}" if label else ""
         QMessageBox.information(
             None,
             "Pigeon Pecker",
             "비둘기가 마우스 커서 옆에서 쪼아댑니다.\n"
-            "클릭 통과를 끄면 비둘기를 클릭해 푸드덕 날릴 수 있습니다.\n"
-            "강제 종료: ⌃⌥⌘Q (Control+Option+Command+Q)",
+            "클릭 통과를 끄면 비둘기를 클릭해 푸드덕 날릴 수 있습니다."
+            + quit_line,
         )
 
     def run(self) -> int:

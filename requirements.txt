@@ -1,4 +1,6 @@
 PySide6>=6.6
-pyobjc-framework-Cocoa>=10
-pyobjc-framework-Quartz>=10
-pyobjc-framework-ApplicationServices>=10
+# macOS 전용 — 네이티브 NSPanel 오버레이 / CGEventTap 단축키 / 접근성 API
+pyobjc-framework-Cocoa>=10 ; sys_platform == "darwin"
+pyobjc-framework-Quartz>=10 ; sys_platform == "darwin"
+pyobjc-framework-ApplicationServices>=10 ; sys_platform == "darwin"
+# Windows 는 추가 의존성 없음 — Qt 오버레이 + ctypes(표준 라이브러리)만 사용
