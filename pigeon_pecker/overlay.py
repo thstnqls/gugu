@@ -11,7 +11,8 @@ from PySide6.QtWidgets import QWidget
 DEBUG_DRAW = os.environ.get("PIGEON_DEBUG_DRAW") == "1"
 
 from .focus_keeper import remember_active_app, restore_previous_app
-from .macos_window import apply_occlusion_workaround, order_front_without_activating, raise_to_overlay_level, set_ignores_mouse_events
+from .native_window import apply_occlusion_workaround, order_front_without_activating, raise_to_overlay_level, set_ignores_mouse_events
+from .platform_support import IS_MAC
 from .pigeon import Pigeon
 from .settings import Settings
 from .trackers.mouse import get_global_mouse_pos
@@ -168,7 +169,6 @@ class OverlayManager:
         self._timer = QTimer()
         self._timer.timeout.connect(self._tick)
         self._interval_ms = 1000 // 60
-        self._timer.start(self._interval_ms)
 
         # 마우스 정지 추적 — 멈춘 지 1초 지나면 비둘기 강제 재표시.
         # 단 한번 재표시한 뒤엔 다시 움직였다 멈출 때까지 대기 (깜빡임 방지)
@@ -180,6 +180,13 @@ class OverlayManager:
         for ov in self.overlays:
             ov.sprites = self.sprites
             ov.show_on_screen()
+
+    def start(self) -> None:
+        """프레임 업데이트 루프 시작 (60fps)."""
+        self._timer.start(self._interval_ms)
+
+    def stop(self) -> None:
+        self._timer.stop()
 
     def set_sprites(self, sprites: dict[str, list] | None) -> None:
         self.sprites = sprites
@@ -210,6 +217,11 @@ class OverlayManager:
             ov.update()
 
     def _check_mouse_still_and_reshow(self) -> None:
+        # 가려짐(occlusion)으로 오버레이가 사라지는 건 macOS 고유 문제다.
+        # Windows/기타에선 항상-위 플래그로 유지되므로 강제 재표시(hide/show)를
+        # 하지 않는다 — 매번 깜빡이고 포커스를 뺏을 수 있기 때문.
+        if not IS_MAC:
+            return
         cur = get_global_mouse_pos()
         if cur is None:
             return
