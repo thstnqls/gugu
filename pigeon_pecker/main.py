@@ -5,15 +5,18 @@ import sys
 from typing import Optional
 
 from PySide6.QtCore import QMetaObject, QPointF, Qt
-from PySide6.QtGui import QAction, QColor, QGuiApplication, QIcon, QPixmap
+from PySide6.QtGui import QAction, QActionGroup, QColor, QGuiApplication, QIcon, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
+from .__version__ import __version__
+from .feed import FeedManager
 from .hotkey import HotkeyListener, hotkey_label
 from .platform_support import IS_MAC, IS_WINDOWS
 from .pigeon import Pigeon
-from .settings import Settings
+from .settings import SPEED_PRESETS, Settings
 from .sprites import load_sprites  # 트레이 아이콘 + (macOS 외) 오버레이 스프라이트
 from .trackers.mouse import get_global_mouse_pos
+from .updater import Updater
 
 
 def _make_tray_icon_from_sprites(sprites: dict[str, list] | None) -> QIcon:
@@ -92,6 +95,7 @@ class App:
             body_color=QColor(120, 130, 150),
         )
         mouse_pigeon.pos = start_mouse
+        self.pigeons = [mouse_pigeon]
 
         # 오버레이 백엔드 선택:
         #  - macOS  : 네이티브 NSPanel (Qt QWidget의 occlusion 문제 회피)
@@ -114,7 +118,18 @@ class App:
             screen_count = len(self.overlays.overlays)
             print(f"[pigeon] Qt overlays created for {screen_count} screen(s)", flush=True)
 
+        self.feed = FeedManager()
+        self.overlays.set_feed_manager(self.feed)
+
         self._build_tray(app_icon)
+
+        self.updater = Updater(self.qapp)
+        self.updater.update_available.connect(self._on_update_available)
+        self.updater.check_failed.connect(lambda msg: print(f"[updater] {msg}", flush=True))
+        self.updater.download_progress.connect(self._on_download_progress)
+        self.updater.install_failed.connect(self._on_install_failed)
+        self.updater.install_ready.connect(lambda p: print(f"[updater] 다운로드 완료: {p}", flush=True))
+        self.updater.check_async()
 
         self.hotkey = HotkeyListener(self._emergency_quit)
         hk_ok = self.hotkey.start()
@@ -143,10 +158,42 @@ class App:
         self.tray.setToolTip("Pigeon Pecker")
 
         menu = QMenu()
+        self.act_feed = QAction("모이 주기 🌾", menu)
+        self.act_feed.triggered.connect(self._on_feed_scatter)
+        menu.addAction(self.act_feed)
+
+        self.act_clear_feed = QAction("모이 치우기", menu)
+        self.act_clear_feed.triggered.connect(self._on_feed_clear)
+        menu.addAction(self.act_clear_feed)
+
+        menu.addSeparator()
+
         self.act_click_through = QAction("클릭 통과 (Click-through)", menu, checkable=True)
         self.act_click_through.setChecked(self.settings.click_through)
-        self.act_click_through.toggled.connect(self.overlays.set_click_through)
+        self.act_click_through.toggled.connect(self._on_click_through_toggled)
         menu.addAction(self.act_click_through)
+
+        speed_menu = QMenu("비둘기 속도", menu)
+        self.speed_group = QActionGroup(speed_menu)
+        self.speed_group.setExclusive(True)
+        for key, label, _, _ in SPEED_PRESETS:
+            act = QAction(label, speed_menu, checkable=True)
+            act.setData(key)
+            act.setChecked(key == self.settings.speed_key)
+            act.triggered.connect(lambda _checked=False, k=key: self._on_speed_changed(k))
+            self.speed_group.addAction(act)
+            speed_menu.addAction(act)
+        menu.addMenu(speed_menu)
+
+        menu.addSeparator()
+        self.act_check_update = QAction("업데이트 확인", menu)
+        self.act_check_update.triggered.connect(self._manual_check_update)
+        menu.addAction(self.act_check_update)
+
+        self.act_install_update = QAction("업데이트 설치", menu)
+        self.act_install_update.setVisible(False)
+        self.act_install_update.triggered.connect(self._install_update)
+        menu.addAction(self.act_install_update)
 
         menu.addSeparator()
         act_about = QAction("정보…", menu)
@@ -162,16 +209,107 @@ class App:
         self.tray.setContextMenu(menu)
         self.tray.show()
 
+    def _on_feed_scatter(self) -> None:
+        # 마우스가 있는 모니터에 뿌리기. 마우스 위치 못 얻으면 주 모니터.
+        p = get_global_mouse_pos()
+        if p is not None:
+            screen = QGuiApplication.screenAt(p.toPoint())
+        else:
+            screen = None
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        from PySide6.QtCore import QRectF
+        # 'availableGeometry' = 메뉴바/dock 제외 영역 — 거기서 추가로 안쪽으로 깎아
+        # 모이가 절대 모니터 가장자리 밖으로 튀어나가지 않게 한다.
+        # (멀티모니터에서 화면 frame이 가상 데스크탑 경계와 안 맞는 경우 대비)
+        avail = QRectF(screen.availableGeometry())
+        pad_x = 60
+        pad_top = 100
+        pad_bottom = 60
+        rect = avail.adjusted(pad_x, pad_top, -pad_x, -pad_bottom)
+        # 추가로 비둘기가 실제 닿을 수 있는 가상 데스크탑 영역과 교집합
+        if hasattr(self.overlays, "virtual_desktop_rect"):
+            vdesk = self.overlays.virtual_desktop_rect()
+            rect = rect.intersected(vdesk)
+        added = self.feed.scatter(rect)
+        print(f"[pigeon] 모이 {added}개 뿌림 — screen='{screen.name()}'", flush=True)
+
+    def _on_feed_clear(self) -> None:
+        self.feed.clear()
+        print("[pigeon] 모이 치움", flush=True)
+
+    def _on_click_through_toggled(self, on: bool) -> None:
+        self.overlays.set_click_through(on)
+        self.settings.save_click_through(on)
+
+    def _on_speed_changed(self, key: str) -> None:
+        self.settings.apply_speed_preset(key)
+        for p in self.pigeons:
+            p.speed = self.settings.walk_speed
+            p.peck_interval_ms = self.settings.peck_interval_ms
+        print(f"[pigeon] speed → {key} (walk={self.settings.walk_speed}, peck={self.settings.peck_interval_ms}ms)", flush=True)
+
     def _show_about(self) -> None:
         label = hotkey_label()
         quit_line = f"\n강제 종료: {label}" if label else ""
         QMessageBox.information(
             None,
             "Pigeon Pecker",
+            f"GUGU v{__version__}\n\n"
             "비둘기가 마우스 커서 옆에서 쪼아댑니다.\n"
             "클릭 통과를 끄면 비둘기를 클릭해 푸드덕 날릴 수 있습니다."
             + quit_line,
         )
+
+    def _on_update_available(self, version: str) -> None:
+        print(f"[updater] 새 버전 발견: {version} (현재 {__version__})", flush=True)
+        self.act_install_update.setText(f"업데이트 설치  ({version})")
+        self.act_install_update.setVisible(True)
+        if QSystemTrayIcon.supportsMessages():
+            self.tray.showMessage(
+                "GUGU 업데이트",
+                f"새 버전 {version} 이(가) 있습니다. 트레이 메뉴에서 설치하세요.",
+                QSystemTrayIcon.MessageIcon.Information,
+                5000,
+            )
+
+    def _on_download_progress(self, pct: int) -> None:
+        self.act_install_update.setText(f"다운로드 중… {pct}%")
+        self.act_install_update.setEnabled(False)
+
+    def _on_install_failed(self, msg: str) -> None:
+        print(f"[updater] {msg}", flush=True)
+        self.act_install_update.setEnabled(True)
+        latest = self.updater.latest_version or ""
+        self.act_install_update.setText(f"업데이트 설치  ({latest})" if latest else "업데이트 설치")
+        QMessageBox.warning(None, "GUGU 업데이트", msg)
+
+    def _manual_check_update(self) -> None:
+        self.act_install_update.setVisible(False)
+        self.updater.check_async()
+        if QSystemTrayIcon.supportsMessages():
+            self.tray.showMessage(
+                "GUGU 업데이트",
+                "업데이트 확인 중…",
+                QSystemTrayIcon.MessageIcon.Information,
+                2000,
+            )
+
+    def _install_update(self) -> None:
+        latest = self.updater.latest_version or ""
+        reply = QMessageBox.question(
+            None,
+            "GUGU 업데이트",
+            f"버전 {latest} 을(를) 설치하시겠습니까?\n"
+            "다운로드 후 앱이 자동으로 재시작됩니다.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.act_install_update.setEnabled(False)
+        self.act_install_update.setText("다운로드 중…")
+        self.updater.download_and_install_async()
 
     def run(self) -> int:
         return self.qapp.exec()

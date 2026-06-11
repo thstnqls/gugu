@@ -1,11 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller spec for GUGU (macOS .app)
 
+import re
 from pathlib import Path
 
 block_cipher = None
 
 project_dir = Path(SPECPATH)
+
+_version_src = (project_dir / 'pigeon_pecker' / '__version__.py').read_text(encoding='utf-8')
+APP_VERSION = re.search(r'__version__\s*=\s*"([^"]+)"', _version_src).group(1)
 
 a = Analysis(
     ['run_app.py'],
@@ -86,12 +90,12 @@ app = BUNDLE(
     name='GUGU.app',
     icon=str(project_dir / 'build' / 'AppIcon.icns'),
     bundle_identifier='com.local.pigeonpecker',
-    version='1.0',
+    version=APP_VERSION,
     info_plist={
         'CFBundleName': 'GUGU',
         'CFBundleDisplayName': 'GUGU',
-        'CFBundleShortVersionString': '1.0',
-        'CFBundleVersion': '1.0',
+        'CFBundleShortVersionString': APP_VERSION,
+        'CFBundleVersion': APP_VERSION,
         'LSMinimumSystemVersion': '11.0',
         # 메뉴바 트레이 전용 (Dock 아이콘 안 띄움)
         'LSUIElement': True,

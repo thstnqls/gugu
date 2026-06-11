@@ -14,6 +14,7 @@ class State(Enum):
     WALK = auto()
     PECK = auto()
     FLY = auto()
+    EAT = auto()  # 모이 위에서 쪼아 먹는 중
 
 
 class Pigeon:
@@ -44,6 +45,10 @@ class Pigeon:
         self._state_time_ms = 0
         self._anim_time_ms = 0
         self._fly_target: Optional[QPointF] = None
+        # 모이 시스템 — main.py에서 set_feed_manager 로 주입
+        self._feed_manager = None
+        self._eat_target: Optional[QPointF] = None
+        self._eat_duration_ms = 1500  # 모이 한 알 먹는 데 걸리는 시간
 
     # 화면 위 비둘기가 차지하는 사각형 (충돌/클릭 판정용) — 32x32 프레임 기준
     def bounding_rect(self) -> QRectF:
@@ -68,6 +73,9 @@ class Pigeon:
             self.pos.y() + math.sin(angle) * dist,
         )
 
+    def set_feed_manager(self, fm) -> None:
+        self._feed_manager = fm
+
     # ───── 매 프레임 업데이트 ──────────────────────────────────
     def update(self, dt_ms: int, screen_rect: QRectF) -> None:
         self._state_time_ms += dt_ms
@@ -76,6 +84,15 @@ class Pigeon:
         if self.state == State.FLY:
             self._update_fly(dt_ms, screen_rect)
             return
+
+        # 모이가 있으면 그쪽으로 우선 이동 / 도착하면 먹기
+        if self._feed_manager is not None and self._feed_manager.count() > 0:
+            self._update_feed(dt_ms, screen_rect)
+            return
+        # 모이 다 먹었으면 EAT 상태 해제
+        if self.state == State.EAT:
+            self.state = State.IDLE
+            self._eat_target = None
 
         target = self.target_provider()
         if target is None:
@@ -102,6 +119,61 @@ class Pigeon:
                 self._state_time_ms = 0
 
         # 가상 데스크탑 밖으로 나가지 않게 클램프 (32x32 스프라이트 기준)
+        margin = 32 * self.scale
+        self.pos.setX(max(screen_rect.left() + margin / 2, min(screen_rect.right() - margin / 2, self.pos.x())))
+        self.pos.setY(max(screen_rect.top() + margin, min(screen_rect.bottom() - 4, self.pos.y())))
+
+    def _update_feed(self, dt_ms: int, screen_rect: QRectF) -> None:
+        """모이 추적 + 도착 시 먹기. _feed_manager 있고 모이 1개 이상일 때만 호출.
+
+        도착 위치는 모이 좌표 그대로가 아니라 facing 방향으로 부리 길이만큼 떨어진
+        위치 — 비둘기 발이 모이를 밟지 않고 부리로 정확히 쪼는 그림이 되도록 한다.
+        """
+        fm = self._feed_manager
+        # 현재 타겟이 없거나 사라졌으면 가장 가까운 모이로 재타겟
+        if self._eat_target is None:
+            self._eat_target = fm.nearest(self.pos)
+            if self._eat_target is None:
+                self.state = State.IDLE
+                return
+            self.state = State.WALK
+            self._state_time_ms = 0
+
+        target = self._eat_target
+        # 비둘기 facing: 모이가 오른쪽이면 +1, 왼쪽이면 -1.
+        # 비둘기 발은 모이의 (facing 반대쪽으로 beak_offset px) 위치에 멈춰야
+        # 부리(머리)가 모이 위에 정확히 온다.
+        beak_offset = 10 * self.scale  # 부리가 머리에서 facing 방향으로 튀어나간 거리
+        side = 1 if target.x() >= self.pos.x() else -1
+        stand_x = target.x() - side * beak_offset
+        stand_y = target.y()
+        dx = stand_x - self.pos.x()
+        dy = stand_y - self.pos.y()
+        dist = math.hypot(dx, dy)
+        arrive_radius = 6.0
+
+        if dist > arrive_radius:
+            # 모이 옆 정지점으로 이동
+            if self.state != State.WALK:
+                self.state = State.WALK
+                self._state_time_ms = 0
+            self.facing = 1 if dx >= 0 else -1
+            step = self.speed * (dt_ms / 1000.0)
+            step = min(step, dist)
+            self.pos.setX(self.pos.x() + dx / dist * step)
+            self.pos.setY(self.pos.y() + dy / dist * step)
+        else:
+            # 도착 → facing을 모이 쪽으로 확정 후 먹기
+            self.facing = side
+            if self.state != State.EAT:
+                self.state = State.EAT
+                self._state_time_ms = 0
+            if self._state_time_ms >= self._eat_duration_ms:
+                fm.eat_at(target)
+                self._eat_target = None  # 다음 tick에 새 타겟 잡음
+                self._state_time_ms = 0
+
+        # 화면 클램프
         margin = 32 * self.scale
         self.pos.setX(max(screen_rect.left() + margin / 2, min(screen_rect.right() - margin / 2, self.pos.x())))
         self.pos.setY(max(screen_rect.top() + margin, min(screen_rect.bottom() - 4, self.pos.y())))
@@ -135,13 +207,19 @@ class Pigeon:
             State.IDLE: "walk",
             State.WALK: "walk",
             State.PECK: "peck",
+            State.EAT: "peck",
             State.FLY: "fly",
         }[self.state]
         frames = sprites.get(key) or sprites.get("walk")
         if not frames:
             self._paint_placeholder(painter)
             return
-        fps = 8 if self.state != State.FLY else 14
+        if self.state == State.FLY:
+            fps = 14
+        elif self.state in (State.PECK, State.EAT):
+            fps = max(4, min(20, int(8 * (600 / max(1, self.peck_interval_ms)))))
+        else:
+            fps = max(4, min(24, int(8 * (self.speed / 220.0))))
         frame_idx = int(self._anim_time_ms / (1000 / fps)) % len(frames)
         pix = frames[frame_idx]
         w = pix.width() * self.scale

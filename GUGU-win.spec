@@ -3,11 +3,15 @@
 # 빌드:  pyinstaller GUGU-win.spec
 # 결과:  dist\GUGU\GUGU.exe  (트레이 상주, 콘솔 창 없음)
 
+import re
 from pathlib import Path
 
 block_cipher = None
 
 project_dir = Path(SPECPATH)
+
+_version_src = (project_dir / 'pigeon_pecker' / '__version__.py').read_text(encoding='utf-8')
+APP_VERSION = re.search(r'__version__\s*=\s*"([^"]+)"', _version_src).group(1)
 
 a = Analysis(
     ['run_app.py'],
@@ -69,7 +73,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # 아이콘이 필요하면 build/AppIcon.ico 를 만들어 icon='build/AppIcon.ico' 지정
+    icon=str(project_dir / 'build' / 'AppIcon.ico'),
 )
 
 coll = COLLECT(
