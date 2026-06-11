@@ -27,6 +27,7 @@ class ScreenOverlay(QWidget):
         self.pigeons = pigeons
         self.settings = settings
         self.sprites: dict[str, list] | None = None
+        self.feed_manager = None
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -111,6 +112,17 @@ class ScreenOverlay(QWidget):
         # Pixel art가 부드럽게 흐려지지 않도록
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
         g = self._screen.geometry()
+        # 모이 먼저 (비둘기 발 아래로 보이게)
+        if self.feed_manager is not None and self.feed_manager.count() > 0:
+            painter.save()
+            painter.translate(-g.x(), -g.y())
+            painter.setPen(QPen(QColor(180, 130, 0, 230), 1))
+            painter.setBrush(QColor(255, 200, 40, 240))
+            for seed in self.feed_manager.snapshot():
+                if not g.contains(seed.toPoint()):
+                    continue
+                painter.drawEllipse(seed, 3.0, 3.0)
+            painter.restore()
         for p in self.pigeons:
             br = p.bounding_rect()
             local_rect = QRectF(
@@ -193,6 +205,12 @@ class OverlayManager:
         for ov in self.overlays:
             ov.sprites = sprites
 
+    def set_feed_manager(self, fm) -> None:
+        for ov in self.overlays:
+            ov.feed_manager = fm
+        for p in self.pigeons:
+            p.set_feed_manager(fm)
+
     def set_click_through(self, on: bool) -> None:
         for ov in self.overlays:
             ov.set_click_through(on)
@@ -202,6 +220,9 @@ class OverlayManager:
         for ov in self.overlays[1:]:
             rect = rect.united(ov._screen.geometry())
         return QRectF(rect)
+
+    def virtual_desktop_rect(self) -> QRectF:
+        return self._virtual_desktop_rect()
 
     def _tick(self) -> None:
         # 현재 활성 앱 기억 (우리가 아닐 때만 기록됨)

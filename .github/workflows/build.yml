@@ -1,0 +1,104 @@
+name: Build GUGU
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  read-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        shell: bash
+        run: |
+          VER=$(grep -E '^__version__' pigeon_pecker/__version__.py | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "Detected version: $VER"
+
+  build-windows:
+    needs: read-version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build with PyInstaller
+        run: pyinstaller GUGU-win.spec --noconfirm
+
+      - name: Stage release files
+        shell: pwsh
+        run: |
+          Copy-Item README-WINDOWS.txt dist\GUGU\README.txt
+          $zip = "dist\GUGU-${{ needs.read-version.outputs.version }}-Windows.zip"
+          Compress-Archive -Path dist\GUGU\* -DestinationPath $zip -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GUGU-Windows
+          path: dist/GUGU-${{ needs.read-version.outputs.version }}-Windows.zip
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/GUGU-${{ needs.read-version.outputs.version }}-Windows.zip
+
+  build-macos:
+    needs: read-version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build with PyInstaller
+        run: pyinstaller GUGU.spec --noconfirm
+
+      - name: Stage release files
+        run: |
+          cd dist
+          # quarantine 속성 제거 (다른 머신에서 받았을 때 Gatekeeper 차단 줄이기)
+          xattr -dr com.apple.quarantine GUGU.app 2>/dev/null || true
+          ZIP="GUGU-${{ needs.read-version.outputs.version }}-macOS.zip"
+          # ditto 가 .app 내부의 심볼릭 링크/메타데이터를 보존 (zip 보다 안전)
+          ditto -c -k --sequesterRsrc --keepParent GUGU.app "$ZIP"
+          ls -la "$ZIP"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GUGU-macOS
+          path: dist/GUGU-${{ needs.read-version.outputs.version }}-macOS.zip
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/GUGU-${{ needs.read-version.outputs.version }}-macOS.zip

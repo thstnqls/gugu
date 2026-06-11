@@ -73,6 +73,8 @@ class PigeonView(NSView):
         self._pigeons = pigeons
         self._sprites = sprites
         self._scale = scale
+        self._feed_manager = None
+        self._global_top_y_cache = None
         return self
 
     def isOpaque(self):
@@ -130,6 +132,23 @@ class PigeonView(NSView):
         screen_h = self._screen_frame.size.height
         scale = self._scale
 
+        # 모이 먼저 그리기 (비둘기 발 아래)
+        if self._feed_manager is not None and self._feed_manager.count() > 0:
+            top = self._global_top_y_cache
+            view_w = self.bounds().size.width
+            view_h = self.bounds().size.height
+            # 황금색
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.78, 0.16, 0.95).set()
+            for seed in self._feed_manager.snapshot():
+                # seed 는 top-left 좌표 → Cocoa global y
+                gy = (top - seed.y()) if top is not None else seed.y()
+                lx = seed.x() - screen_x
+                ly = gy - screen_y
+                if lx < -10 or lx > view_w + 10 or ly < -10 or ly > view_h + 10:
+                    continue
+                path = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(lx - 3, ly - 3, 6, 6))
+                path.fill()
+
         for p in self._pigeons:
             self._draw_pigeon(p, ctx, screen_x, screen_y, screen_h, scale)
 
@@ -145,13 +164,19 @@ class PigeonView(NSView):
             State.IDLE: "walk",
             State.WALK: "walk",
             State.PECK: "peck",
+            State.EAT: "peck",
             State.FLY: "fly",
         }.get(pigeon.state, "walk")
         frames = sprites.get(key) or sprites.get("walk")
         if not frames:
             return
 
-        fps = 8 if pigeon.state != State.FLY else 14
+        if pigeon.state == State.FLY:
+            fps = 14
+        elif pigeon.state in (State.PECK, State.EAT):
+            fps = max(4, min(20, int(8 * (600 / max(1, pigeon.peck_interval_ms)))))
+        else:
+            fps = max(4, min(24, int(8 * (pigeon.speed / 220.0))))
         frame_idx = int(pigeon._anim_time_ms / (1000 / fps)) % len(frames)
         img = frames[frame_idx]
         img_size = img.size()
@@ -246,23 +271,22 @@ class NSOverlayManager:
         self.views: list = []
         self._screens_snapshot = []  # NSScreen frame snapshots
 
-        # NSScreen 정보 캐시
+        # 1단계: 모든 화면 정보 먼저 모은다 — top_y 계산을 panel 만들기 전에 해야
+        # 첫 drawRect_ 호출 시점에도 좌표 변환이 정확하다.
         for screen in NSScreen.screens():
-            f = screen.frame()
-            self._screens_snapshot.append(f)
+            self._screens_snapshot.append(screen.frame())
+        self._global_screen_top_y = self._compute_global_top_y()
+
+        # 2단계: panel/view 생성 — view가 만들어지자마자 top_y가 세팅돼 있도록
+        for f in self._screens_snapshot:
             panel, view = self._create_panel_for_screen(f)
+            view._global_top_y_cache = self._global_screen_top_y
             self.panels.append(panel)
             self.views.append(view)
 
         self._timer = None
         self._handler = None
         self._interval = 1.0 / 60.0  # 60fps
-
-        # 글로벌 좌표계 변환을 위한 화면 높이 (가장 위에 있는 화면 기준)
-        self._global_screen_top_y = self._compute_global_top_y()
-        # view들에 글로벌 top y 캐시 — mouseDown 좌표 변환용
-        for v in self.views:
-            v._global_top_y_cache = self._global_screen_top_y
 
     # ─ panel 생성 ───────────────────────────────────────────────
     def _create_panel_for_screen(self, screen_frame):
@@ -316,6 +340,12 @@ class NSOverlayManager:
         self.sprites = sprites
         for v in self.views:
             v._sprites = sprites
+
+    def set_feed_manager(self, fm) -> None:
+        for v in self.views:
+            v._feed_manager = fm
+        for p in self.pigeons:
+            p.set_feed_manager(fm)
 
     def show(self):
         for p in self.panels:
